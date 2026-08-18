@@ -3,12 +3,22 @@ import cors from "cors";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { InstancesClient } from "@google-cloud/compute";
+import { google } from "googleapis";
 import { z } from "zod";
 
 const app = express();
 app.use(cors());
 
 const instancesClient = new InstancesClient();
+
+const auth = new google.auth.GoogleAuth({
+  scopes: [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.readonly"
+  ]
+});
+const drive = google.drive({ version: "v3", auth });
 
 // Health check para Google Cloud Run
 app.get("/", (_req: Request, res: Response) => {
@@ -29,10 +39,158 @@ app.get("/health", (_req: Request, res: Response) => {
 // Inicializar Servidor MCP
 const mcpServer = new McpServer({
   name: "google-cloud-mcp-server",
-  version: "1.2.0"
+  version: "1.3.0"
 });
 
-// Herramienta 1: Listar Máquinas Virtuales de Google Compute Engine
+// ==========================================
+// SECCIÓN 1: GOOGLE DRIVE TOOLS
+// ==========================================
+
+// Herramienta: Listar y buscar archivos en Google Drive
+mcpServer.tool(
+  "buscar_archivos_drive",
+  "Busca archivos y carpetas en Google Drive por nombre, tipo o contenido",
+  {
+    busqueda: z.string().optional().describe("Término de búsqueda o nombre de archivo (opcional)"),
+    max_resultados: z.number().optional().describe("Número máximo de resultados (por defecto 10)")
+  },
+  async ({ busqueda, max_resultados = 10 }) => {
+    try {
+      let q = "trashed = false";
+      if (busqueda) {
+        q += ` and name contains '${busqueda.replace(/'/g, "\\'")}'`;
+      }
+
+      const res = await drive.files.list({
+        q: q,
+        pageSize: max_resultados,
+        fields: "files(id, name, mimeType, size, modifiedTime, webViewLink, owners)"
+      });
+
+      const files = res.data.files || [];
+      if (files.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No se encontraron archivos en Google Drive con esos criterios. Asegúrate de haber compartido la carpeta o archivo con la cuenta de servicio de Google Cloud: 922428032361-compute@developer.gserviceaccount.com"
+            }
+          ]
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              total_encontrados: files.length,
+              archivos: files.map(f => ({
+                id: f.id,
+                nombre: f.name,
+                tipo: f.mimeType,
+                tamano_bytes: f.size || "N/A",
+                ultima_modificacion: f.modifiedTime,
+                enlace: f.webViewLink
+              }))
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error al consultar Google Drive: ${error.message || error}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
+// Herramienta: Leer contenido de un archivo de Google Drive
+mcpServer.tool(
+  "leer_archivo_drive",
+  "Lee el contenido de texto de un archivo o documento de Google Drive usando su File ID",
+  {
+    file_id: z.string().describe("ID del archivo en Google Drive")
+  },
+  async ({ file_id }) => {
+    try {
+      const fileMeta = await drive.files.get({
+        fileId: file_id,
+        fields: "id, name, mimeType"
+      });
+
+      const mimeType = fileMeta.data.mimeType || "";
+
+      // Si es Google Docs, exportar como texto plano
+      if (mimeType === "application/vnd.google-apps.document") {
+        const exportRes = await drive.files.export({
+          fileId: file_id,
+          mimeType: "text/plain"
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `[Google Doc: ${fileMeta.data.name}]\n\n${exportRes.data}`
+            }
+          ]
+        };
+      }
+
+      // Si es Google Sheets, exportar como CSV
+      if (mimeType === "application/vnd.google-apps.spreadsheet") {
+        const exportRes = await drive.files.export({
+          fileId: file_id,
+          mimeType: "text/csv"
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `[Google Sheet (CSV): ${fileMeta.data.name}]\n\n${exportRes.data}`
+            }
+          ]
+        };
+      }
+
+      // Archivo binario o de texto estándar
+      const getRes = await drive.files.get({
+        fileId: file_id,
+        alt: "media"
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `[Archivo: ${fileMeta.data.name}]\n\n${typeof getRes.data === "string" ? getRes.data : JSON.stringify(getRes.data, null, 2)}`
+          }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error al leer archivo de Google Drive: ${error.message || error}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
+// ==========================================
+// SECCIÓN 2: COMPUTE ENGINE TOOLS
+// ==========================================
+
 mcpServer.tool(
   "listar_maquinas_virtuales",
   "Lista todas las instancias de máquinas virtuales (Compute Engine VMs) en el proyecto de Google Cloud",
@@ -102,7 +260,6 @@ mcpServer.tool(
   }
 );
 
-// Herramienta 2: Obtener detalles completos de una VM (Metadata, Discos, Tags, etc.)
 mcpServer.tool(
   "obtener_detalles_vm",
   "Obtiene la configuración detallada, discos, etiquetas, metadatos y sistema operativo de una VM",
@@ -174,7 +331,10 @@ mcpServer.tool(
   }
 );
 
-// Herramienta 3: Información del servicio en la nube
+// ==========================================
+// SECCIÓN 3: SERVICIOS Y UTILIDADES
+// ==========================================
+
 mcpServer.tool(
   "obtener_info_cloud",
   "Devuelve información del estado del servidor MCP y entorno Cloud Run",
@@ -191,36 +351,6 @@ mcpServer.tool(
             timestamp: new Date().toISOString(),
             environment: process.env.NODE_ENV || "production"
           }, null, 2)
-        }
-      ]
-    };
-  }
-);
-
-// Herramienta 4: Procesar texto
-mcpServer.tool(
-  "procesar_texto",
-  "Herramienta de ejemplo para procesar y transformar texto en Cloud Run",
-  {
-    texto: z.string().describe("El texto de entrada a procesar"),
-    operacion: z.enum(["mayusculas", "minusculas", "contar_palabras"]).describe("Operación a realizar")
-  },
-  async ({ texto, operacion }) => {
-    let resultado = "";
-    if (operacion === "mayusculas") {
-      resultado = texto.toUpperCase();
-    } else if (operacion === "minusculas") {
-      resultado = texto.toLowerCase();
-    } else if (operacion === "contar_palabras") {
-      const cantidad = texto.trim().split(/\s+/).filter(Boolean).length;
-      resultado = `Total de palabras: ${cantidad}`;
-    }
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `[Cloud Run MCP]: ${resultado}`
         }
       ]
     };
