@@ -29,10 +29,10 @@ app.get("/health", (_req: Request, res: Response) => {
 // Inicializar Servidor MCP
 const mcpServer = new McpServer({
   name: "google-cloud-mcp-server",
-  version: "1.1.0"
+  version: "1.2.0"
 });
 
-// Herramienta: Listar Máquinas Virtuales de Google Compute Engine
+// Herramienta 1: Listar Máquinas Virtuales de Google Compute Engine
 mcpServer.tool(
   "listar_maquinas_virtuales",
   "Lista todas las instancias de máquinas virtuales (Compute Engine VMs) en el proyecto de Google Cloud",
@@ -102,7 +102,79 @@ mcpServer.tool(
   }
 );
 
-// Herramienta: Información del servicio en la nube
+// Herramienta 2: Obtener detalles completos de una VM (Metadata, Discos, Tags, etc.)
+mcpServer.tool(
+  "obtener_detalles_vm",
+  "Obtiene la configuración detallada, discos, etiquetas, metadatos y sistema operativo de una VM",
+  {
+    nombre: z.string().describe("Nombre de la máquina virtual (ej: vps0dinosbakery)"),
+    zona: z.string().describe("Zona de la máquina virtual (ej: us-central1-b)")
+  },
+  async ({ nombre, zona }) => {
+    try {
+      const projectId = await instancesClient.getProjectId();
+      const [instance] = await instancesClient.get({
+        project: projectId,
+        zone: zona,
+        instance: nombre
+      });
+
+      const discos = (instance.disks || []).map((d: any) => ({
+        nombre: d.deviceName,
+        tamano_gb: d.diskSizeGb,
+        tipo: d.type,
+        boot: d.boot,
+        licencias: d.licenses?.map((l: string) => l.split("/").pop())
+      }));
+
+      const metadatos: Record<string, string> = {};
+      if (instance.metadata?.items) {
+        for (const item of instance.metadata.items) {
+          if (item.key && item.value) {
+            metadatos[item.key] = item.value;
+          }
+        }
+      }
+
+      const networkInterfaces = instance.networkInterfaces || [];
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              nombre: instance.name,
+              id: instance.id,
+              descripcion: instance.description || "Sin descripción",
+              estado: instance.status,
+              zona: zona,
+              tipo_maquina: instance.machineType?.split("/").pop(),
+              ip_interna: networkInterfaces[0]?.networkIP,
+              ip_externa: networkInterfaces[0]?.accessConfigs?.[0]?.natIP,
+              tags_red: instance.tags?.items || [],
+              etiquetas_labels: instance.labels || {},
+              discos: discos,
+              metadatos: metadatos,
+              service_accounts: instance.serviceAccounts?.map((s: any) => s.email)
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error obteniendo detalles de ${nombre}: ${error.message || error}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
+// Herramienta 3: Información del servicio en la nube
 mcpServer.tool(
   "obtener_info_cloud",
   "Devuelve información del estado del servidor MCP y entorno Cloud Run",
@@ -125,7 +197,7 @@ mcpServer.tool(
   }
 );
 
-// Herramienta: Procesar texto
+// Herramienta 4: Procesar texto
 mcpServer.tool(
   "procesar_texto",
   "Herramienta de ejemplo para procesar y transformar texto en Cloud Run",
@@ -155,7 +227,6 @@ mcpServer.tool(
   }
 );
 
-// Registro de transportes SSE activos
 const transports = new Map<string, SSEServerTransport>();
 
 app.get("/sse", async (req: Request, res: Response) => {
