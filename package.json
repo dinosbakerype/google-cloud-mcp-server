@@ -8,10 +8,17 @@
     "start": "node dist/server.js",
     "dev": "npx tsx src/server.ts"
   },
-  "keywords": ["mcp", "model-context-protocol", "google-cloud", "cloud-run", "sse"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "google-cloud",
+    "cloud-run",
+    "sse"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google-cloud/compute": "^7.1.0",
     "@modelcontextprotocol/sdk": "^1.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
