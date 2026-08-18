@@ -2,10 +2,13 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { InstancesClient } from "@google-cloud/compute";
 import { z } from "zod";
 
 const app = express();
 app.use(cors());
+
+const instancesClient = new InstancesClient();
 
 // Health check para Google Cloud Run
 app.get("/", (_req: Request, res: Response) => {
@@ -26,10 +29,80 @@ app.get("/health", (_req: Request, res: Response) => {
 // Inicializar Servidor MCP
 const mcpServer = new McpServer({
   name: "google-cloud-mcp-server",
-  version: "1.0.0"
+  version: "1.1.0"
 });
 
-// Herramienta 1: Información del servicio en la nube
+// Herramienta: Listar Máquinas Virtuales de Google Compute Engine
+mcpServer.tool(
+  "listar_maquinas_virtuales",
+  "Lista todas las instancias de máquinas virtuales (Compute Engine VMs) en el proyecto de Google Cloud",
+  {},
+  async () => {
+    try {
+      const projectId = await instancesClient.getProjectId();
+      const vms: any[] = [];
+      const iterable = instancesClient.aggregatedListAsync({ project: projectId });
+
+      for await (const [zone, response] of iterable) {
+        if (response.instances) {
+          for (const instance of response.instances) {
+            const networkInterfaces = instance.networkInterfaces || [];
+            const ipInterna = networkInterfaces[0]?.networkIP || "N/A";
+            const ipExterna = networkInterfaces[0]?.accessConfigs?.[0]?.natIP || "Sin IP externa";
+            const machineType = instance.machineType ? instance.machineType.split("/").pop() : "N/A";
+            const zoneName = zone.replace("zones/", "");
+
+            vms.push({
+              nombre: instance.name,
+              zona: zoneName,
+              estado: instance.status || "DESCONOCIDO",
+              tipo_maquina: machineType,
+              ip_interna: ipInterna,
+              ip_externa: ipExterna,
+              fecha_creacion: instance.creationTimestamp || "N/A"
+            });
+          }
+        }
+      }
+
+      if (vms.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Proyecto GCP: "${projectId}". No se encontraron máquinas virtuales creadas en ninguna zona.`
+            }
+          ]
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              proyecto: projectId,
+              total_vms: vms.length,
+              maquinas_virtuales: vms
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error al consultar Compute Engine: ${error.message || error}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
+// Herramienta: Información del servicio en la nube
 mcpServer.tool(
   "obtener_info_cloud",
   "Devuelve información del estado del servidor MCP y entorno Cloud Run",
@@ -52,7 +125,7 @@ mcpServer.tool(
   }
 );
 
-// Herramienta 2: Ejecutar cálculo / utilidad personalizada
+// Herramienta: Procesar texto
 mcpServer.tool(
   "procesar_texto",
   "Herramienta de ejemplo para procesar y transformar texto en Cloud Run",
@@ -85,11 +158,9 @@ mcpServer.tool(
 // Registro de transportes SSE activos
 const transports = new Map<string, SSEServerTransport>();
 
-// Endpoint SSE: Antigravity y otros clientes se conectan aquí
 app.get("/sse", async (req: Request, res: Response) => {
   console.log(`[${new Date().toISOString()}] Nueva conexión SSE establecida`);
   
-  // Endpoint donde el cliente enviará mensajes POST
   const transport = new SSEServerTransport("/messages", res);
   transports.set(transport.sessionId, transport);
 
@@ -101,7 +172,6 @@ app.get("/sse", async (req: Request, res: Response) => {
   await mcpServer.connect(transport);
 });
 
-// Endpoint Messages: Recibe peticiones JSON-RPC del cliente
 app.post("/messages", async (req: Request, res: Response) => {
   const sessionId = req.query.sessionId as string;
   const transport = transports.get(sessionId);
@@ -115,8 +185,5 @@ app.post("/messages", async (req: Request, res: Response) => {
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`=============================================`);
-  console.log(` Google Cloud MCP Server escuchando en puerto ${PORT}`);
-  console.log(` SSE Endpoint: http://0.0.0.0:${PORT}/sse`);
-  console.log(`=============================================`);
+  console.log(`Google Cloud MCP Server escuchando en puerto ${PORT}`);
 });
